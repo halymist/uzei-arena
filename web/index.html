@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="cs">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>superhry · kancelářská aréna</title>
+  <meta name="theme-color" content="#141c30" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700;800&display=swap" />
+  <link rel="stylesheet" href="/style.css" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div class="game-root">
+    <canvas id="game-canvas"></canvas>
+    <div id="fx-layer" class="fx-layer"></div>
+    <div id="vignette" class="vignette"></div>
+    <div id="screen-flash" class="screen-flash"></div>
+
+    <div class="hud">
+      <!-- top: day / timer / target -->
+      <div class="topbar">
+        <div class="day" id="day-name">Pondělí</div>
+        <div class="timer-wrap"><span class="phase" id="phase-label"></span><span class="timer" id="round-timer">4:00</span></div>
+        <div class="target" id="score-target"></div>
+      </div>
+
+      <!-- left: scoreboard -->
+      <div class="scoreboard">
+        <div class="sb-head"><span>Hráč</span><span>Body</span></div>
+        <ul id="score-list"></ul>
+      </div>
+
+      <!-- right: killfeed -->
+      <div id="killfeed" class="killfeed"></div>
+
+      <div id="banner" class="banner"><div id="banner-title" class="banner-title"></div><div id="banner-sub" class="banner-sub"></div></div>
+      <div id="respawn-indicator" class="respawn-indicator" hidden>4</div>
+      <div id="stun-note" class="stun-note" hidden>Omráčen</div>
+
+      <div class="buff-stack"><div id="active-buffs" class="active-buffs"></div></div>
+
+      <div class="hp-center-panel">
+        <div id="buff-w-indicator" class="buff-indicator" hidden>Sprint</div>
+        <div id="r-cast-wrap" class="cast-bar-wrap" hidden><div class="cast-bar-track"><div id="r-cast-fill" class="cast-bar-fill"></div></div></div>
+        <div id="collect-wrap" class="cast-bar-wrap collect" hidden><div class="cast-bar-track"><div id="collect-fill" class="cast-bar-fill"></div><div id="collect-text" class="cast-bar-text">+1</div></div></div>
+        <div class="hp-bar"><div id="hp-fill" class="hp-fill"></div><div id="hp-shield-fill" class="hp-shield-fill"></div><div id="hp-text" class="bar-value">100 / 100</div></div>
+        <div class="mp-bar"><div id="mp-fill" class="mp-fill"></div><div id="mp-text" class="bar-value">100 / 100</div></div>
+      </div>
+
+      <div class="ability-bar" id="ability-bar">
+        <div class="ability-slot" id="slot-q"><div class="key">Q</div><div class="icon" id="slot-q-icon"></div><div class="cost" id="slot-q-cost"></div><div class="label" id="slot-q-label"></div><div class="cd-mask" id="slot-q-mask"></div><div class="cd-text" id="slot-q-cd"></div><div class="lock-mask" id="slot-q-lock" hidden>ZABAVENO</div></div>
+        <div class="ability-slot" id="slot-w"><div class="key">W</div><div class="icon" id="slot-w-icon"></div><div class="cost" id="slot-w-cost"></div><div class="label" id="slot-w-label"></div><div class="cd-mask" id="slot-w-mask"></div><div class="cd-text" id="slot-w-cd"></div><div class="lock-mask" id="slot-w-lock" hidden>ZABAVENO</div></div>
+        <div class="ability-slot" id="slot-e"><div class="key">E</div><div class="icon" id="slot-e-icon"></div><div class="cost" id="slot-e-cost"></div><div class="label" id="slot-e-label"></div><div class="cd-mask" id="slot-e-mask"></div><div class="cd-text" id="slot-e-cd"></div><div class="lock-mask" id="slot-e-lock" hidden>ZABAVENO</div></div>
+        <div class="ability-slot" id="slot-r"><div class="key">R</div><div class="icon" id="slot-r-icon"></div><div class="cost" id="slot-r-cost"></div><div class="label" id="slot-r-label"></div><div class="cd-mask" id="slot-r-mask"></div><div class="cd-text" id="slot-r-cd"></div><div class="lock-mask" id="slot-r-lock" hidden>ZABAVENO</div></div>
+        <div class="ability-slot" id="slot-d"><div class="key">D</div><div class="icon" id="slot-d-icon"></div><div class="cost" id="slot-d-cost"></div><div class="label" id="slot-d-label"></div><div class="cd-mask" id="slot-d-mask"></div><div class="cd-text" id="slot-d-cd"></div><div class="lock-mask" id="slot-d-lock" hidden>ZABAVENO</div></div>
+        <div class="ability-slot" id="slot-f"><div class="key">F</div><div class="icon" id="slot-f-icon"></div><div class="cost" id="slot-f-cost"></div><div class="label" id="slot-f-label"></div><div class="cd-mask" id="slot-f-mask"></div><div class="cd-text" id="slot-f-cd"></div><div class="lock-mask" id="slot-f-lock" hidden>ZABAVENO</div></div>
+        <button id="talent-btn" class="talent-btn" type="button" title="Talenty (B)">Talenty<span id="talent-badge" class="talent-badge" hidden>0</span></button>
+      </div>
+
+      <div class="corner-btns">
+        <button id="quality-btn" class="icon-btn wide" type="button" title="Kvalita grafiky (nízká = rychlejší)">Kvalita</button>
+        <button id="help-btn" class="icon-btn" type="button" title="Nápověda">?</button>
+        <button id="mute-btn" class="icon-btn" type="button" title="Zvuk">🔊</button>
+      </div>
+
+      <!-- overlay: round end / weekend / talents -->
+      <div id="talent-tip" class="talent-tip" hidden></div>
+      <div id="overlay" class="overlay" hidden>
+        <div class="ov-box">
+          <div class="ov-head">
+            <div class="ov-head-left">
+              <div id="overlay-title" class="ov-title"></div>
+              <div id="overlay-sub" class="ov-sub"></div>
+            </div>
+            <div class="ov-head-right">
+              <div id="overlay-timer" class="ov-timer"></div>
+              <button id="ready-btn" class="ready-btn" type="button">Připraven</button>
+            </div>
+          </div>
+          <div class="ov-body">
+            <div class="ov-left">
+              <div id="standings" class="standings"></div>
+              <div id="week-box" class="week-box" hidden></div>
+            </div>
+            <div class="ov-center">
+              <div class="ov-section-title">Talenty <span id="talent-pts" class="talent-pts"></span></div>
+              <div id="talent-panel" class="talent-panel"></div>
+            </div>
+          </div>
+          <div class="ov-picker">
+            <div class="ov-section-title">Kouzla <span class="muted" id="picker-hint">klikni na kouzlo a pak na klávesu, nebo ho přetáhni</span></div>
+            <div class="picker-row">
+              <div id="spell-cards" class="spell-cards"></div>
+              <div id="ov-slots" class="ov-slots"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="help" class="help" hidden>
+        <div class="help-box">
+          <div class="help-title">Kancelářská aréna <button id="help-close" class="ov-close" type="button">Zavřít</button></div>
+          <ul>
+            <li><b>Pravé tlačítko</b> pohyb, <b>levé tlačítko</b> střela, <b>Q W E R D F</b> kouzla ze slotů, <b>Y</b> zamknout/odemknout kameru, <b>mezerník</b> kamera na mě.</li>
+            <li>Týden má 5 dnů. Každý den je jedno kolo na 4 minuty, vyhrává nejvíc bodů.</li>
+            <li>Body padají na zem tam, kde někdo umřel (vedoucí a Ředitel jsou za 2). Sebereš je tak, že na nich 2 s stojíš.</li>
+            <li>Vítěz dne dostane <b>Home Office den</b>. Kdo jich má v pátek nejvíc, vyhrává týden.</li>
+            <li>O přestávce dostaneš talentové body. Talenty vydrží celý týden.</li>
+            <li>Zdi zastaví střely, sklo a stoly ne.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div id="name-modal" class="name-modal">
+      <div class="box">
+        <div class="box-logo"><img src="/favicon.svg" alt="" width="44" height="44" /><div><div class="box-title">Kancelářská aréna</div><div class="box-sub">Zadej jméno</div></div></div>
+        <input id="name-input" maxlength="16" placeholder="player" autofocus />
+        <div class="box-hint">Pravé tlačítko = pohyb · levé = střela · Q/W/E/R/D/F = kouzla</div>
+        <button id="name-go">Do práce</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/main.js"></script>
+</body>
+</html>

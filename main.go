@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -14,7 +15,7 @@ import (
 	"time"
 )
 
-//go:embed index.html main.js style.css
+//go:embed web
 var webFS embed.FS
 
 func main() {
@@ -26,9 +27,13 @@ func main() {
 	arena := NewArenaHub()
 	go arena.Run()
 
-	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.FS(webFS)))
+	sub, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatalf("embed: %v", err)
+	}
 
+	mux := http.NewServeMux()
+	mux.Handle("/", noCache(http.FileServer(http.FS(sub))))
 	mux.HandleFunc("/ws/arena", arena.ServeWS)
 
 	srv := &http.Server{
@@ -40,6 +45,9 @@ func main() {
 	go func() {
 		for _, u := range localListenURLs(addr) {
 			log.Printf("superhry listening on %s", u)
+		}
+		if fastMode {
+			log.Printf("FAST MODE: phases shortened for testing")
 		}
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("listen: %v", err)
@@ -56,7 +64,14 @@ func main() {
 	_ = srv.Shutdown(ctx)
 }
 
-// s
+// noCache keeps browsers from holding on to stale JS between builds.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func localListenURLs(addr string) []string {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -64,15 +79,13 @@ func localListenURLs(addr string) []string {
 		if strings.HasPrefix(trimmed, ":") {
 			port = strings.TrimPrefix(trimmed, ":")
 		} else {
-			port = "1010"
+			port = "8080"
 		}
 		host = ""
 	}
-
 	if host != "" && host != "0.0.0.0" && host != "::" {
 		return []string{"http://" + net.JoinHostPort(host, port) + "/"}
 	}
-
 	urls := map[string]struct{}{
 		"http://localhost:" + port + "/": {},
 	}
@@ -90,7 +103,6 @@ func localListenURLs(addr string) []string {
 			urls["http://"+ip4.String()+":"+port+"/"] = struct{}{}
 		}
 	}
-
 	out := make([]string, 0, len(urls))
 	for u := range urls {
 		out = append(out, u)
