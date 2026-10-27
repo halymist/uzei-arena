@@ -492,6 +492,8 @@ func (h *ArenaHub) applyCast(ev castEvent) {
 	}
 	h.recomputePlayerDerivedStatsLocked(c, nowMS)
 	c.state.Mana -= cost
+	// purely cosmetic: lets other clients play the cast animation
+	h.broadcastJSON(sMsg{Type: "effect", Data: sEffect{Kind: "cast", Target: c.id, Spell: ev.kind}})
 
 	if ev.kind == "e" && ev.hasPos {
 		c.state.X = clamp(ev.x, -mapHalfX, mapHalfX)

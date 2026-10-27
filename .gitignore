@@ -1,2 +1,3 @@
 *.exe
 /superhry
+.playwright-mcp/

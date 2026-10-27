@@ -325,7 +325,7 @@ type sLeave struct {
 }
 
 type sEffect struct {
-	Kind   string  `json:"kind"` // lock | heal | leader
+	Kind   string  `json:"kind"` // lock | heal | leader | score | cast
 	Target uint64  `json:"target"`
 	Spell  string  `json:"spell,omitempty"`
 	Until  int64   `json:"until,omitempty"`

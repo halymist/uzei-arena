@@ -8,6 +8,7 @@ import * as fx from './fx.js';
 import { initInput } from './input.js';
 import { connect } from './net.js';
 import * as audio from './audio.js';
+import { ready as charactersReady } from './characters.js';
 
 // ------------------------------------------------------------ name modal
 
@@ -32,7 +33,8 @@ function startWithName() {
   } catch { /* ignore */ }
   nameModal.style.display = 'none';
   audio.init();
-  startGame();
+  // the rigs are small and local; wait for them so the first snapshot has bodies
+  charactersReady.then(startGame);
 }
 nameGo.addEventListener('click', startWithName);
 nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') startWithName(); });
@@ -129,14 +131,14 @@ function loop(t) {
     }
     m.mesh.scale.setScalar(Math.max(0.05, s));
     const movingNow = G.myVel.x !== 0 || G.myVel.y !== 0 || G.chargeAnim.active;
-    ent.animateBody(m.mesh, movingNow, now, dt);
+    ent.driveMe(m, movingNow, Math.hypot(G.myVel.x, G.myVel.y), now, dt);
   }
 
   ent.interpolateRemote(now, dt);
   ent.refreshCollisionTargets();
   spells.update(dt, alive);
   ent.updatePickups();
-  ent.updateNpcVisuals(Date.now());
+  ent.updateNpcVisuals(Date.now(), dt);
   fx.update(dt);
   updateCamera(dt);
   hud.updateFrame(now);

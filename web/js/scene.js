@@ -1,10 +1,13 @@
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { G } from './state.js';
 import { PLAYER_RADIUS } from './config.js';
 
-// Rendering is tuned for office laptops: Lambert shading, two lights, the
-// whole static map merged into a handful of draw calls, and a quality
-// setting that mostly controls the render resolution.
+// Rendering is tuned for office laptops: Lambert shading, two lights, one
+// shadow map, and the whole static map drawn as instances of a small prop
+// kit modelled in Blender (tools/blender/office_kit.py builds it and exports
+// web/models/office_kit.glb). The quality setting mostly controls the render
+// resolution; "low" also turns shadows off.
 
 const QUALITY_LEVELS = ['low', 'medium', 'high'];
 let quality = 'medium';
@@ -23,6 +26,8 @@ export const renderer = new THREE.WebGLRenderer({ canvas, antialias: quality !==
 renderer.setPixelRatio(pixelRatioFor(quality));
 renderer.setSize(window.innerWidth, window.innerHeight, false);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+renderer.shadowMap.enabled = quality !== 'low';
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
 export function qualityLabel() {
   return { low: 'Kvalita: nízká', medium: 'Kvalita: střední', high: 'Kvalita: vysoká' }[quality];
@@ -32,6 +37,11 @@ export function cycleQuality() {
   quality = QUALITY_LEVELS[(QUALITY_LEVELS.indexOf(quality) + 1) % QUALITY_LEVELS.length];
   try { localStorage.setItem('superhry-quality', quality); } catch { /* ignore */ }
   renderer.setPixelRatio(pixelRatioFor(quality));
+  const shadows = quality !== 'low';
+  if (renderer.shadowMap.enabled !== shadows) {
+    renderer.shadowMap.enabled = shadows;
+    scene.traverse(o => { if (o.material) o.material.needsUpdate = true; });
+  }
   resize();
   return qualityLabel();
 }
@@ -46,9 +56,14 @@ const CAM_LOOK_OFFSET_Z = -2.0;
 const CAM_PAN_EDGE = 0.8;
 const CAM_PAN_SPEED = 30.0;
 
-scene.add(new THREE.HemisphereLight(0xa9c8ff, 0x2a1f3a, 0.9));
-const sun = new THREE.DirectionalLight(0xfff2dc, 1.1);
+scene.add(new THREE.HemisphereLight(0xbcd0ff, 0x3a2f45, 0.8));
+const sun = new THREE.DirectionalLight(0xfff1dc, 1.3);
 sun.position.set(14, 26, 12);
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -40, right: 40, top: 30, bottom: -30, near: 1, far: 90 });
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.03;
 scene.add(sun);
 
 export let halfX = 28;
@@ -57,194 +72,309 @@ export const obstacles = [];          // movement collision rects
 export const projectileBlockers = []; // subset that stops shots
 let mapGroup = null;
 
+// ------------------------------------------------------------ prop kit
+
+// piece name -> [{ geometry, material, matrix }], one entry per material
+const kit = new Map();
+const lambertCache = new Map();
+
+// The glTF comes in with PBR materials; Lambert is plenty for this look and
+// much cheaper on integrated GPUs.
+function toLambert(src) {
+  let m = lambertCache.get(src.uuid);
+  if (m) return m;
+  const seeThrough = src.transparent || src.opacity < 1;
+  m = new THREE.MeshLambertMaterial({
+    color: src.color,
+    emissive: src.emissive,
+    emissiveIntensity: src.emissiveIntensity ?? 1,
+    transparent: seeThrough,
+    opacity: seeThrough ? src.opacity : 1,
+    depthWrite: !seeThrough,
+    side: seeThrough ? THREE.DoubleSide : THREE.FrontSide,
+  });
+  m.name = src.name;
+  lambertCache.set(src.uuid, m);
+  return m;
+}
+
+const kitReady = new GLTFLoader().loadAsync('/models/office_kit.glb').then(gltf => {
+  const inv = new THREE.Matrix4();
+  for (const node of gltf.scene.children) {
+    node.updateWorldMatrix(true, true);
+    inv.copy(node.matrixWorld).invert();
+    const parts = [];
+    node.traverse(o => {
+      if (!o.isMesh) return;
+      parts.push({ geometry: o.geometry, material: toLambert(o.material), matrix: new THREE.Matrix4().multiplyMatrices(inv, o.matrixWorld) });
+    });
+    kit.set(node.name, parts);
+  }
+});
+
+// Placements are collected per piece and flushed as one InstancedMesh per
+// piece material, so the whole office is a few dozen draw calls.
+const placements = new Map();
+const _pos = new THREE.Vector3();
+const _quat = new THREE.Quaternion();
+const _scl = new THREE.Vector3();
+const _euler = new THREE.Euler();
+const DESK_DEFAULT = new THREE.Color(0xe9e6df);
+
+function place(piece, x, y, z, { sx = 1, sy = 1, sz = 1, ry = 0, color = null } = {}) {
+  let list = placements.get(piece);
+  if (!list) {
+    list = [];
+    placements.set(piece, list);
+  }
+  _euler.set(0, ry, 0);
+  _quat.setFromEuler(_euler);
+  _pos.set(x, y, z);
+  _scl.set(sx, sy, sz);
+  list.push({ m: new THREE.Matrix4().compose(_pos, _quat, _scl), color });
+}
+
+function flushPlacements(group) {
+  const tmp = new THREE.Matrix4();
+  for (const [piece, list] of placements) {
+    const parts = kit.get(piece);
+    if (!parts) {
+      console.warn('office kit has no piece', piece);
+      continue;
+    }
+    for (const part of parts) {
+      const inst = new THREE.InstancedMesh(part.geometry, part.material, list.length);
+      const tint = part.material.name === 'DeskTop';
+      list.forEach((p, i) => {
+        inst.setMatrixAt(i, tmp.multiplyMatrices(p.m, part.matrix));
+        if (tint) inst.setColorAt(i, p.color || DESK_DEFAULT);
+      });
+      inst.castShadow = !part.material.transparent;
+      inst.receiveShadow = true;
+      inst.frustumCulled = false;
+      inst.matrixAutoUpdate = false;
+      group.add(inst);
+    }
+  }
+  placements.clear();
+}
+
 // ------------------------------------------------------------ map building
 
-// Every static piece is pushed into a bucket keyed by material, then each
-// bucket becomes one merged mesh.
-const buckets = new Map();
-
-// Minimal merge (position + normal + uv) so no addon has to be fetched.
-function mergeGeometries(geoms) {
-  const parts = geoms.map(g => (g.index ? g.toNonIndexed() : g));
-  const total = parts.reduce((n, g) => n + g.attributes.position.count, 0);
-  const pos = new Float32Array(total * 3);
-  const nor = new Float32Array(total * 3);
-  const uv = new Float32Array(total * 2);
-  let off = 0;
-  for (const g of parts) {
-    const n = g.attributes.position.count;
-    pos.set(g.attributes.position.array, off * 3);
-    if (g.attributes.normal) nor.set(g.attributes.normal.array, off * 3);
-    if (g.attributes.uv) uv.set(g.attributes.uv.array, off * 2);
-    off += n;
-  }
-  const out = new THREE.BufferGeometry();
-  out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
-  out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
-  return out;
-}
-const tmpMatrix = new THREE.Matrix4();
-const tmpQuat = new THREE.Quaternion();
-const tmpScale = new THREE.Vector3(1, 1, 1);
-const tmpPos = new THREE.Vector3();
-const tmpEuler = new THREE.Euler();
-
-function part(geom, color, x, y, z, opts = {}) {
-  const key = `${opts.basic ? 'b' : 'l'}|${color}|${opts.opacity ?? 1}|${opts.emissive ?? 0}`;
-  let b = buckets.get(key);
-  if (!b) {
-    b = { geoms: [], color, opts };
-    buckets.set(key, b);
-  }
-  tmpEuler.set(opts.rx || 0, opts.ry || 0, opts.rz || 0);
-  tmpQuat.setFromEuler(tmpEuler);
-  tmpPos.set(x, y, z);
-  tmpMatrix.compose(tmpPos, tmpQuat, tmpScale);
-  const g = geom.clone();
-  g.applyMatrix4(tmpMatrix);
-  geom.dispose();
-  b.geoms.push(g);
+function hexColor(s) {
+  return s ? new THREE.Color(parseInt(s.replace('#', ''), 16)) : null;
 }
 
-function boxPart(w, h, d, color, x, y, z, opts) {
-  part(new THREE.BoxGeometry(w, h, d), color, x, y, z, opts);
-}
-
-function flushBuckets(group) {
-  for (const b of buckets.values()) {
-    if (!b.geoms.length) continue;
-    const merged = mergeGeometries(b.geoms);
-    for (const g of b.geoms) g.dispose();
-    let mat;
-    if (b.opts.basic) {
-      mat = new THREE.MeshBasicMaterial({ color: b.color, transparent: (b.opts.opacity ?? 1) < 1, opacity: b.opts.opacity ?? 1, side: THREE.DoubleSide, depthWrite: (b.opts.opacity ?? 1) >= 1 });
-    } else {
-      mat = new THREE.MeshLambertMaterial({ color: b.color, transparent: (b.opts.opacity ?? 1) < 1, opacity: b.opts.opacity ?? 1, emissive: b.opts.emissive ?? 0x000000, emissiveIntensity: b.opts.emissiveIntensity ?? 1 });
+// A 4x4 m carpet tile pattern, repeated over the floor.
+function carpetTexture() {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 256;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#4a556f';
+  ctx.fillRect(0, 0, 256, 256);
+  for (let ty = 0; ty < 2; ty++) {
+    for (let tx = 0; tx < 2; tx++) {
+      ctx.fillStyle = (tx + ty) % 2 ? 'rgba(255,255,255,0.02)' : 'rgba(0,0,0,0.03)';
+      ctx.fillRect(tx * 128, ty * 128, 128, 128);
     }
-    const mesh = new THREE.Mesh(merged, mat);
-    mesh.matrixAutoUpdate = false;
-    group.add(mesh);
   }
-  buckets.clear();
+  for (let i = 0; i < 2600; i++) {
+    const v = Math.random();
+    ctx.fillStyle = v < 0.5 ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.07)';
+    ctx.fillRect(Math.random() * 256, Math.random() * 256, 1.5, 1.5);
+  }
+  ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+  ctx.lineWidth = 1;
+  for (const k of [0.5, 128.5]) {
+    ctx.beginPath(); ctx.moveTo(k, 0); ctx.lineTo(k, 256); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, k); ctx.lineTo(256, k); ctx.stroke();
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  return tex;
+}
+
+// wall / glass segments: the kit piece is 1 m long and 0.6 thick
+function addWallSegment(piece, x, z, w, d, h) {
+  const alongX = w >= d;
+  const len = alongX ? w : d;
+  const thick = alongX ? d : w;
+  place(piece, x, 0, z, { sx: len, sy: h / 2.4, sz: thick / 0.6, ry: alongX ? 0 : Math.PI / 2 });
+}
+
+// A doorway is a gap of 1-4 m between two collinear wall segments.
+function addDoorways(segs) {
+  for (const a of segs) {
+    for (const b of segs) {
+      if (a === b) continue;
+      const alongX = a.w >= a.d;
+      if (alongX !== (b.w >= b.d)) continue;
+      if (alongX) {
+        if (Math.abs(a.z - b.z) > 0.05) continue;
+        const gap = (b.x - b.w / 2) - (a.x + a.w / 2);
+        if (gap < 1 || gap > 4) continue;
+        const sy = a.h / 2.4;
+        place('doorframe', a.x + a.w / 2 + gap / 2, 0, a.z, { sx: gap, sy });
+        place('doorpost', a.x + a.w / 2 + 0.06, 0, a.z, { sy });
+        place('doorpost', b.x - b.w / 2 - 0.06, 0, a.z, { sy });
+      } else {
+        if (Math.abs(a.x - b.x) > 0.05) continue;
+        const gap = (b.z - b.d / 2) - (a.z + a.d / 2);
+        if (gap < 1 || gap > 4) continue;
+        const sy = a.h / 2.4;
+        const ry = Math.PI / 2;
+        place('doorframe', a.x, 0, a.z + a.d / 2 + gap / 2, { sx: gap, sy, ry });
+        place('doorpost', a.x, 0, a.z + a.d / 2 + 0.06, { sy, ry });
+        place('doorpost', a.x, 0, b.z - b.d / 2 - 0.06, { sy, ry });
+      }
+    }
+  }
+}
+
+function addDesk(o) {
+  const { x, z, w, d, h } = o;
+  const color = hexColor(o.color);
+  place('desk_top', x, 0, z, { sx: w, sy: h, sz: d, color });
+  for (const s of [-1, 1]) place('desk_panel', x + s * (w / 2 - 0.1), 0, z, { sy: h, sz: d - 0.2 });
+
+  const variant = o.variant || (w >= 3 && d <= 2 ? 'pair' : 'plain');
+  const seat = d / 2 + 0.42;
+  if (variant === 'pair') {
+    // two workstations, chairs on the camera side facing the desk
+    for (const dx of [-w / 4, w / 4]) {
+      place('monitor', x + dx, h, z - 0.18);
+      place('keyboard', x + dx, h, z + 0.22);
+      place('chair', x + dx, 0, z + seat, { ry: Math.PI });
+    }
+  } else if (variant === 'exec') {
+    // the boss sits behind the desk, facing the room
+    place('monitor', x - 0.7, h, z + 0.15, { ry: Math.PI });
+    place('keyboard', x - 0.7, h, z - 0.2, { ry: Math.PI });
+    place('chair', x - 0.7, 0, z - seat);
+  } else if (variant === 'meeting') {
+    const n = Math.max(2, Math.floor(w / 1.5));
+    const step = w / n;
+    for (let i = 0; i < n; i++) {
+      const cx = x - w / 2 + step * (i + 0.5);
+      place('chair', cx, 0, z - seat);
+      place('chair', cx, 0, z + seat, { ry: Math.PI });
+    }
+  }
 }
 
 function addObstacle(o) {
-  const colorHex = o.color ? parseInt(o.color.replace('#', ''), 16) : null;
   const { x, z, w, d, h } = o;
   switch (o.kind) {
     case 'wall':
-      boxPart(w, h, d, 0x4b5f8a, x, h / 2, z);
-      boxPart(w + 0.06, 0.12, d + 0.06, 0x7f93bf, x, h + 0.06, z);
-      break;
     case 'glass':
-      boxPart(w, h, d, 0x9fd8ff, x, h / 2, z, { opacity: 0.22 });
-      boxPart(w + 0.05, 0.1, d + 0.05, 0xd8e8ff, x, h, z);
-      boxPart(w + 0.05, 0.16, d + 0.05, 0xd8e8ff, x, 0.08, z);
+      addWallSegment(o.kind, x, z, w, d, h);
       break;
-    case 'desk': {
-      boxPart(w, 0.12, d, colorHex ?? 0x6b7aa0, x, h - 0.06, z);
-      for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
-        boxPart(0.12, h - 0.12, 0.12, 0x2d3650, x + sx * (w / 2 - 0.2), (h - 0.12) / 2, z + sz * (d / 2 - 0.2));
-      }
-      if (w >= 3 && d <= 2) {
-        for (const sx of [-0.8, 0.8]) {
-          boxPart(0.7, 0.45, 0.06, 0x121826, x + sx, h + 0.3, z, { emissive: 0x3a86ff, emissiveIntensity: 0.4 });
-          boxPart(0.08, 0.14, 0.08, 0x1c2233, x + sx, h + 0.07, z);
-        }
+    case 'desk':
+      addDesk(o);
+      break;
+    case 'rack': {
+      // a row of 1 m rack units, fronts toward the middle of the map
+      const alongZ = d >= w;
+      const n = Math.max(1, Math.round(alongZ ? d : w));
+      const ry = alongZ ? (x < 0 ? Math.PI : 0) : (z < 0 ? -Math.PI / 2 : Math.PI / 2);
+      for (let i = 0; i < n; i++) {
+        const t = -(n - 1) / 2 + i;
+        place('rack', alongZ ? x : x + t, 0, alongZ ? z + t : z, { sx: (alongZ ? w : d) / 1.2, sy: h / 2.2, ry });
       }
       break;
     }
-    case 'rack':
-      boxPart(w, h, d, 0x1b2130, x, h / 2, z);
-      for (let i = 0; i < 6; i++) {
-        boxPart(0.08, 0.08, 0.05, 0x00ff88, x + w / 2 + 0.01, 0.4 + i * 0.3, z - d / 2 + 0.4 + (i % 3) * 0.5, { emissive: 0x00ff88, emissiveIntensity: 1.2 });
-      }
-      break;
     case 'pillar':
-      boxPart(w, h, d, 0x5f7199, x, h / 2, z);
+      place('pillar', x, 0, z, { sx: w / 1.1, sy: h / 3, sz: d / 1.1 });
       break;
     case 'printer':
-      boxPart(w, h * 0.7, d, 0x8a93a8, x, h * 0.35, z);
-      boxPart(w * 0.8, h * 0.3, d * 0.8, 0xb9c1d4, x, h * 0.85, z);
+      place('printer', x, 0, z, { sx: w, sy: h / 1.3, sz: d });
       break;
     default:
-      boxPart(w, h, d, 0x4b5f8a, x, h / 2, z);
+      place('pillar', x, 0, z, { sx: w / 1.1, sy: h / 3, sz: d / 1.1 });
   }
 }
 
 function addProp(p) {
-  const { x, z } = p;
-  const ry = p.rot || 0;
-  switch (p.kind) {
-    case 'plant':
-      part(new THREE.CylinderGeometry(0.32, 0.26, 0.5, 8), 0x8c5a3c, x, 0.25, z);
-      for (let i = 0; i < 4; i++) {
-        const a = (i / 4) * Math.PI * 2;
-        part(new THREE.SphereGeometry(0.38, 7, 5), 0x3f9a4f, x + Math.cos(a) * 0.18, 0.9 + (i % 2) * 0.22, z + Math.sin(a) * 0.18);
-      }
-      break;
-    case 'watercooler':
-      boxPart(0.5, 1.0, 0.5, 0xdfe6f3, x, 0.5, z);
-      part(new THREE.CylinderGeometry(0.22, 0.22, 0.55, 10), 0x7fd4ff, x, 1.3, z, { opacity: 0.55 });
-      break;
-    case 'whiteboard':
-      boxPart(1.8, 1.1, 0.08, 0xf4f7fb, x, 1.4, z, { ry });
-      boxPart(1.9, 1.2, 0.05, 0x7b8597, x - Math.sin(ry) * 0.03, 1.4, z - Math.cos(ry) * 0.03, { ry });
-      break;
-  }
+  place(p.kind, p.x, p.y || 0, p.z, { ry: p.rot || 0 });
 }
 
-export function buildMap(def) {
-  if (mapGroup) {
-    scene.remove(mapGroup);
-    mapGroup.traverse(o => {
-      if (o.geometry) o.geometry.dispose();
-      if (o.material) o.material.dispose();
-    });
-  }
-  mapGroup = new THREE.Group();
-  obstacles.length = 0;
-  projectileBlockers.length = 0;
-  halfX = def.halfX;
-  halfZ = def.halfZ;
+function disposeMap() {
+  if (!mapGroup) return;
+  scene.remove(mapGroup);
+  mapGroup.traverse(o => {
+    if (o.isInstancedMesh) { o.dispose(); return; } // kit geometry/material stay shared
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      if (o.material.map) o.material.map.dispose();
+      o.material.dispose();
+    }
+  });
+  mapGroup = null;
+}
 
-  // floor + zones as unlit planes (no need to shade a flat carpet)
-  part(new THREE.PlaneGeometry(halfX * 2, halfZ * 2), 0x2b3a5c, 0, 0, 0, { rx: -Math.PI / 2, basic: true });
+function buildVisuals(def) {
+  disposeMap();
+  mapGroup = new THREE.Group();
+
+  const carpet = carpetTexture();
+  carpet.repeat.set(halfX * 2 / 4, halfZ * 2 / 4);
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(halfX * 2, halfZ * 2), new THREE.MeshLambertMaterial({ map: carpet }));
+  floor.rotation.x = -Math.PI / 2;
+  floor.receiveShadow = true;
+  mapGroup.add(floor);
   for (const zn of def.zones || []) {
-    part(new THREE.PlaneGeometry(zn.w, zn.d), parseInt(zn.color.replace('#', ''), 16), zn.x, 0.02, zn.z, { rx: -Math.PI / 2, basic: true });
+    const zone = new THREE.Mesh(
+      new THREE.PlaneGeometry(zn.w, zn.d),
+      new THREE.MeshLambertMaterial({ color: hexColor(zn.color), transparent: true, opacity: 0.55, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1 })
+    );
+    zone.rotation.x = -Math.PI / 2;
+    zone.position.set(zn.x, 0.01, zn.z);
+    zone.receiveShadow = true;
+    mapGroup.add(zone);
   }
-  const grid = new THREE.GridHelper(Math.max(halfX, halfZ) * 2, Math.max(halfX, halfZ), 0x3b4d75, 0x33436a);
-  grid.position.y = 0.012;
-  grid.material.transparent = true;
-  grid.material.opacity = 0.4;
-  mapGroup.add(grid);
 
   const wallH = 2.4;
-  const outer = [
+  for (const [w, d, x, z] of outerWalls()) addWallSegment('wall', x, z, w, d, wallH);
+  const obs = def.obstacles || [];
+  for (const o of obs) addObstacle(o);
+  addDoorways(obs.filter(o => o.kind === 'wall' || o.kind === 'glass'));
+  for (const p of def.props || []) addProp(p);
+
+  flushPlacements(mapGroup);
+  scene.add(mapGroup);
+}
+
+function outerWalls() {
+  return [
     [halfX * 2 + 1, 0.5, 0, halfZ + 0.25],
     [halfX * 2 + 1, 0.5, 0, -halfZ - 0.25],
     [0.5, halfZ * 2, halfX + 0.25, 0],
     [0.5, halfZ * 2, -halfX - 0.25, 0],
   ];
-  for (const [w, d, x, z] of outer) {
-    boxPart(w, wallH, d, 0x3a4c74, x, wallH / 2, z);
-    boxPart(w + 0.06, 0.12, d + 0.06, 0x6f84b3, x, wallH + 0.06, z);
+}
+
+// Collision is set up synchronously so gameplay never waits for models; the
+// visuals follow as soon as the kit has loaded.
+export function buildMap(def) {
+  obstacles.length = 0;
+  projectileBlockers.length = 0;
+  halfX = def.halfX;
+  halfZ = def.halfZ;
+
+  for (const [w, d, x, z] of outerWalls()) {
     const r = { minX: x - w / 2, maxX: x + w / 2, minZ: z - d / 2, maxZ: z + d / 2, kind: 'wall' };
     obstacles.push(r);
     projectileBlockers.push(r);
   }
-
   for (const o of def.obstacles || []) {
-    addObstacle(o);
     const r = { minX: o.x - o.w / 2, maxX: o.x + o.w / 2, minZ: o.z - o.d / 2, maxZ: o.z + o.d / 2, kind: o.kind };
     obstacles.push(r);
     if (o.kind === 'wall' || o.kind === 'rack' || o.kind === 'pillar') projectileBlockers.push(r);
   }
-  for (const p of def.props || []) addProp(p);
 
-  flushBuckets(mapGroup);
-  scene.add(mapGroup);
+  kitReady.then(() => buildVisuals(def), err => console.error('office kit failed to load', err));
 }
 
 // ------------------------------------------------------------ collision

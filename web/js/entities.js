@@ -5,6 +5,7 @@ import { PLAYER_RADIUS, PLAYER_MODEL_COLORS, PICKUP_RADIUS, INTERP_DELAY_MS, POI
 import { makeNameSprite, setNameSprite, makeHpSprite, setHpSprite, makeStunSprite, disposeSprite } from './sprites.js';
 import * as fx from './fx.js';
 import { sfx } from './audio.js';
+import * as chars from './characters.js';
 
 export function modelColor(model) {
   const i = Math.max(0, Math.min(PLAYER_MODEL_COLORS.length - 1, Math.trunc(model || 0)));
@@ -12,8 +13,10 @@ export function modelColor(model) {
 }
 
 function disposeObject(root) {
+  if (root.userData.ch) chars.disposeCharacter(root.userData.ch);
   root.traverse(o => {
     if (o.isSprite) { disposeSprite(o); return; }
+    if (o.isSkinnedMesh) return; // handled by disposeCharacter
     if (o.geometry) o.geometry.dispose();
     if (o.material) {
       if (Array.isArray(o.material)) o.material.forEach(m => m.dispose()); else o.material.dispose();
@@ -21,38 +24,20 @@ function disposeObject(root) {
   });
 }
 
+// Solid body parts throw a shadow on the floor; rings, bubbles and sprites do not.
+function castShadows(root) {
+  root.traverse(o => {
+    if (o.isMesh && !o.material.transparent) o.castShadow = true;
+  });
+}
+
 // ------------------------------------------------------------ players
 
 export function makeBody(color) {
   const g = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.CapsuleGeometry(PLAYER_RADIUS, 0.8, 4, 10),
-    new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.12 })
-  );
-  body.position.y = 0.9;
-  g.add(body);
-
-  const tie = new THREE.Mesh(
-    new THREE.BoxGeometry(0.14, 0.5, 0.06),
-    new THREE.MeshLambertMaterial({ color: 0x1b2238 })
-  );
-  tie.position.set(0, 0.85, 0.6);
-  g.add(tie);
-
-  const face = new THREE.Mesh(
-    new THREE.SphereGeometry(0.17, 14, 10),
-    new THREE.MeshLambertMaterial({ color: 0xe8f6ff, emissive: 0x9adfff, emissiveIntensity: 0.38 })
-  );
-  face.position.set(0, 1.12, 0.6);
-  g.add(face);
-
-  const eyeMat = new THREE.MeshLambertMaterial({ color: 0x11253d, emissive: 0x8de7ff, emissiveIntensity: 0.5 });
-  const eyeL = new THREE.Mesh(new THREE.SphereGeometry(0.04, 10, 8), eyeMat);
-  eyeL.position.set(-0.055, 1.14, 0.72);
-  g.add(eyeL);
-  const eyeR = eyeL.clone();
-  eyeR.position.x = 0.055;
-  g.add(eyeR);
+  const ch = chars.createCharacter('player', color);
+  g.add(ch.root);
+  g.userData.ch = ch;
 
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(0.86, 0.98, 24),
@@ -64,10 +49,10 @@ export function makeBody(color) {
   g.userData.ring = ring;
 
   const shieldBubble = new THREE.Mesh(
-    new THREE.SphereGeometry(1.08, 24, 16),
+    new THREE.SphereGeometry(1.15, 24, 16),
     new THREE.MeshBasicMaterial({ color: 0x8bd8ff, transparent: true, opacity: 0.2, depthWrite: false, side: THREE.DoubleSide })
   );
-  shieldBubble.position.y = 0.95;
+  shieldBubble.position.y = 1.0;
   shieldBubble.visible = false;
   g.add(shieldBubble);
   g.userData.shieldBubble = shieldBubble;
@@ -83,33 +68,31 @@ export function makeBody(color) {
   g.userData.invulnRing = invulnRing;
 
   const nameSprite = makeNameSprite('');
-  nameSprite.position.y = 2.2;
+  nameSprite.position.y = 2.5;
   g.add(nameSprite);
   g.userData.nameSprite = nameSprite;
 
   const hpSprite = makeHpSprite();
-  hpSprite.position.y = 1.85;
+  hpSprite.position.y = 2.2;
   g.add(hpSprite);
   g.userData.hpSprite = hpSprite;
 
   const stunSp = makeStunSprite();
-  stunSp.position.y = 2.9;
+  stunSp.position.y = 3.05;
   stunSp.visible = false;
   g.add(stunSp);
   g.userData.stunSprite = stunSp;
 
-  g.rotation.order = 'YXZ'; // turn first, then lean while running
-  g.userData.bodyMat = body.material;
   g.userData.color = color;
   return g;
 }
+
 
 export function applyPlayerModelVisual(pl, model) {
   const color = modelColor(model);
   pl.color = color;
   pl.model = model;
-  pl.mesh.userData.bodyMat.color.setHex(color);
-  pl.mesh.userData.bodyMat.emissive.setHex(color);
+  chars.setTint(pl.mesh.userData.ch, color);
   pl.mesh.userData.ring.material.color.setHex(color);
 }
 
@@ -182,7 +165,16 @@ export function applyPlayersSnapshot(snap) {
       const cutoff = snap.t - 1000;
       while (pl.snapshots.length > 2 && pl.snapshots[0].t < cutoff) pl.snapshots.shift();
     }
-    pl.mesh.visible = p.alive;
+    // the kill message may flip pl.alive before this snapshot, so the
+    // character's own flag is the source of truth for the transition
+    if (!p.alive && !ud.ch.dead) {
+      pl.diedAt = performance.now();
+      chars.die(ud.ch);
+    } else if (p.alive && ud.ch.dead) {
+      chars.revive(ud.ch);
+    }
+    // the body stays for a moment so the death animation is seen
+    pl.mesh.visible = p.alive || performance.now() - (pl.diedAt || 0) < DEATH_SHOW_MS;
 
     if (p.id === G.myId) {
       const desync = Math.hypot(G.myPos.x - p.x, G.myPos.z - p.z);
@@ -201,18 +193,30 @@ export function applyPlayersSnapshot(snap) {
   }
 }
 
-// A little run cycle for the capsule people: forward lean, a quick bob and a
-// slight side-to-side roll. Idle settles back to upright.
-export function animateBody(mesh, moving, now, dt) {
-  const ud = mesh.userData;
-  ud.runK = ud.runK ?? 0;
-  const target = moving ? 1 : 0;
-  ud.runK += (target - ud.runK) * Math.min(1, dt * 14);
-  const k = ud.runK;
-  const phase = now / 95;
-  mesh.rotation.x = 0.16 * k;
-  mesh.rotation.z = Math.sin(phase) * 0.06 * k;
-  mesh.position.y = Math.abs(Math.sin(phase)) * 0.11 * k;
+const DEATH_SHOW_MS = 1200;
+
+// Local player: the animation state comes straight from the simulation.
+export function driveMe(pl, moving, speed, now, dt) {
+  const ch = pl.mesh.userData.ch;
+  chars.drive(ch, {
+    moving,
+    speed,
+    stunned: Date.now() < G.myStunUntil,
+    collecting: !!G.collect,
+    channeling: G.rCastUntil > now,
+    charging: G.chargeAnim.active,
+  }, dt);
+}
+
+// One-shot clip on any player or NPC (spell casts, hits, bites).
+export function animEvent(id, name, opts) {
+  const e = G.players.get(id) || G.npcs.get(id);
+  if (e) chars.trigger(e.mesh.userData.ch, name, opts);
+}
+
+export function animHold(id, name, ms) {
+  const e = G.players.get(id) || G.npcs.get(id);
+  if (e) chars.hold(e.mesh.userData.ch, name, ms);
 }
 
 export function interpolateRemote(now, dt) {
@@ -242,8 +246,15 @@ export function interpolateRemote(now, dt) {
       while (da < -Math.PI) da += Math.PI * 2;
       pl.mesh.rotation.y = a.facing + da * k;
     }
-    const moved = Math.hypot(pl.mesh.position.x - prevX, pl.mesh.position.z - prevZ) > 0.002;
-    animateBody(pl.mesh, moved, now, dt);
+    const dist = Math.hypot(pl.mesh.position.x - prevX, pl.mesh.position.z - prevZ);
+    const nowMs = Date.now();
+    chars.drive(pl.mesh.userData.ch, {
+      moving: dist > 0.002,
+      speed: dist / Math.max(0.001, dt),
+      stunned: nowMs < pl.stunUntil,
+      collecting: !!pl.collectPickup,
+    }, dt);
+    if (!pl.alive && pl.mesh.visible && performance.now() - (pl.diedAt || 0) >= DEATH_SHOW_MS) pl.mesh.visible = false;
   }
 }
 
@@ -252,118 +263,23 @@ export function interpolateRemote(now, dt) {
 export function makeNPCMesh(n) {
   const g = new THREE.Group();
   const kind = n.kind;
-  if (kind === 'pes') {
-    const bodyMat = new THREE.MeshLambertMaterial({ color: 0x8c6a45, emissive: 0x3d2a18, emissiveIntensity: 0.2 });
-    const headMat = new THREE.MeshLambertMaterial({ color: 0xa67b4f });
-    const body = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.55, 0.62), bodyMat);
-    body.position.y = 0.58;
-    g.add(body);
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.43, 0.45), headMat);
-    head.position.set(0, 0.72, 0.72);
-    g.add(head);
-    const earMat = new THREE.MeshLambertMaterial({ color: 0x3f2b17 });
-    const earL = new THREE.Mesh(new THREE.ConeGeometry(0.08, 0.2, 8), earMat);
-    earL.position.set(-0.13, 0.95, 0.76);
-    earL.rotation.x = Math.PI;
-    g.add(earL);
-    const earR = earL.clone();
-    earR.position.x = 0.13;
-    g.add(earR);
-    const legGeo = new THREE.CylinderGeometry(0.08, 0.08, 0.44, 8);
-    for (const p of [[-0.42, 0.24, 0.22], [0.42, 0.24, 0.22], [-0.42, 0.24, -0.2], [0.42, 0.24, -0.2]]) {
-      const leg = new THREE.Mesh(legGeo, bodyMat);
-      leg.position.set(p[0], p[1], p[2]);
-      g.add(leg);
-    }
-    const tail = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.04, 0.42, 8), bodyMat);
-    tail.position.set(0, 0.72, -0.72);
-    tail.rotation.x = -0.8;
-    g.add(tail);
-    const muzzle = new THREE.Mesh(new THREE.SphereGeometry(0.1, 10, 8), new THREE.MeshLambertMaterial({ color: 0x1d130d, emissive: 0x3a2516, emissiveIntensity: 0.35 }));
-    muzzle.position.set(0, 0.65, 0.98);
-    g.add(muzzle);
-  } else if (kind === 'reditel') {
-    const bodyMat = new THREE.MeshLambertMaterial({ color: 0x3b3f52, emissive: 0x1a1c28, emissiveIntensity: 0.25 });
-    const torso = new THREE.Mesh(new THREE.SphereGeometry(0.88, 20, 14), bodyMat);
-    torso.scale.set(1.18, 0.92, 1.04);
-    torso.position.y = 0.98;
-    g.add(torso);
-    const shirt = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.9, 0.1), new THREE.MeshLambertMaterial({ color: 0xf4f4f4 }));
-    shirt.position.set(0, 1.05, 0.86);
-    g.add(shirt);
-    const tie = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.6, 0.05), new THREE.MeshLambertMaterial({ color: 0xc0273a }));
-    tie.position.set(0, 1.0, 0.93);
-    g.add(tie);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.34, 16, 12), new THREE.MeshLambertMaterial({ color: 0xf4e2c8 }));
-    head.position.set(0, 1.72, 0.3);
-    g.add(head);
-    const face = new THREE.Mesh(new THREE.SphereGeometry(0.18, 14, 10), new THREE.MeshLambertMaterial({ color: 0xf4f9ff, emissive: 0xffb15c, emissiveIntensity: 0.3 }));
-    face.position.set(0, 1.74, 0.62);
-    g.add(face);
-  } else if (kind === 'sofie') {
-    const dressMat = new THREE.MeshLambertMaterial({ color: 0x84b6ff, emissive: 0x335b95, emissiveIntensity: 0.16 });
-    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.46, 1.05, 16), dressMat);
-    torso.position.y = 0.94;
-    g.add(torso);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.24, 14, 11), new THREE.MeshLambertMaterial({ color: 0xf2dccf }));
-    head.position.set(0, 1.58, 0.2);
-    g.add(head);
-    const hairMat = new THREE.MeshLambertMaterial({ color: 0x3f2217 });
-    const hairCap = new THREE.Mesh(new THREE.SphereGeometry(0.27, 14, 10), hairMat);
-    hairCap.scale.set(1.04, 0.74, 1.05);
-    hairCap.position.set(0, 1.72, 0.12);
-    g.add(hairCap);
-    const pony = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.05, 0.55, 10), hairMat);
-    pony.position.set(0, 1.48, -0.22);
-    pony.rotation.x = 0.46;
-    g.add(pony);
-    const face = new THREE.Mesh(new THREE.SphereGeometry(0.13, 12, 9), new THREE.MeshLambertMaterial({ color: 0xf8fbff, emissive: 0x8adfff, emissiveIntensity: 0.2 }));
-    face.position.set(0, 1.58, 0.48);
-    g.add(face);
+  const ch = chars.createCharacter(kind);
+  g.add(ch.root);
+  g.userData.ch = ch;
+
+  if (kind === 'sofie') {
     const healRing = new THREE.Mesh(new THREE.RingGeometry(2.25, 2.4, 48), new THREE.MeshBasicMaterial({ color: 0x8dffb6, transparent: true, opacity: 0.35, side: THREE.DoubleSide }));
     healRing.rotation.x = -Math.PI / 2;
     healRing.position.y = 0.05;
     g.add(healRing);
     g.userData.healRing = healRing;
-  } else if (kind === 'curda') {
-    const coatMat = new THREE.MeshLambertMaterial({ color: 0xb4cc64, emissive: 0x4f5f28, emissiveIntensity: 0.2 });
-    const torso = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.45, 1.08, 16), coatMat);
-    torso.position.y = 0.95;
-    g.add(torso);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.23, 14, 11), new THREE.MeshLambertMaterial({ color: 0xf0dccd }));
-    head.position.set(0, 1.58, 0.2);
-    g.add(head);
-    const glasses = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.08, 0.04), new THREE.MeshLambertMaterial({ color: 0x1d1f29 }));
-    glasses.position.set(0, 1.59, 0.45);
-    g.add(glasses);
-    const phone = new THREE.Mesh(new THREE.BoxGeometry(0.13, 0.24, 0.03), new THREE.MeshLambertMaterial({ color: 0x2b2f3f, emissive: 0x6cf0ff, emissiveIntensity: 0.6 }));
-    phone.position.set(0.26, 1.0, 0.35);
-    phone.rotation.y = -0.6;
-    g.add(phone);
-  } else {
-    // namestek: suit, no tie, big nose
-    const color = 0x6b8fcf;
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(PLAYER_RADIUS, 0.9, 4, 8), new THREE.MeshLambertMaterial({ color, emissive: color, emissiveIntensity: 0.12 }));
-    body.position.y = 0.95;
-    g.add(body);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.26, 14, 11), new THREE.MeshLambertMaterial({ color: 0xf0d8c4 }));
-    head.position.set(0, 1.75, 0.15);
-    g.add(head);
-    const nose = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.22, 8), new THREE.MeshLambertMaterial({ color: 0xe8b9a0 }));
-    nose.position.set(0, 1.72, 0.44);
-    nose.rotation.x = Math.PI / 2;
-    g.add(nose);
-    const folder = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.4, 0.05), new THREE.MeshLambertMaterial({ color: 0xf2e6b0 }));
-    folder.position.set(0.5, 1.0, 0.3);
-    g.add(folder);
   }
 
-  // vertical stack above the head: hp bar, name, (bounty), stun stars, speech bubble
+  // vertical stack above the head: hp bar, name, stun stars, speech bubble
+  const k = (chars.VARIANTS[kind] || chars.VARIANTS.player).scale;
   const stack = kind === 'pes'
-    ? { hp: 1.45, name: 1.8, stun: 2.2, talk: 2.85 }
-    : kind === 'reditel'
-      ? { hp: 2.35, name: 2.7, stun: 3.3, talk: 3.95 }
-      : { hp: 2.05, name: 2.4, stun: 2.85, talk: 3.5 };
+    ? { hp: 1.3, name: 1.65, stun: 2.05, talk: 2.7 }
+    : { hp: 1.85 * k, name: 2.15 * k, stun: 2.55 * k, talk: 3.1 * k };
 
   const nameSp = makeNameSprite(n.name || n.kind, '#e6f2ff');
   nameSp.position.y = stack.name;
@@ -390,6 +306,7 @@ export function makeNPCMesh(n) {
   return g;
 }
 
+
 export function applyNPCsSnapshot(snap) {
   const seen = new Set();
   const now = Date.now();
@@ -399,9 +316,15 @@ export function applyNPCsSnapshot(snap) {
     if (!obj) {
       const mesh = makeNPCMesh(n);
       scene.add(mesh);
-      obj = { id: n.id, mesh, kind: n.kind, name: n.name, hp: n.hp || 0, maxHp: n.maxHp || 0, alive: n.alive !== false, say: '', sayUntil: 0, lastSay: '', stunUntil: 0 };
+      obj = { id: n.id, mesh, kind: n.kind, name: n.name, hp: n.hp || 0, maxHp: n.maxHp || 0, alive: n.alive !== false, say: '', sayUntil: 0, lastSay: '', stunUntil: 0, sx: n.x, sz: n.z, st: snap.t, speed: 0, diedAt: 0 };
       G.npcs.set(n.id, obj);
       mesh.position.set(n.x, 0, n.z);
+    }
+    // server-side speed, used to pick walk/run/charge clips
+    const sdt = (snap.t - obj.st) / 1000;
+    if (sdt > 0.01) {
+      obj.speed = Math.hypot(n.x - obj.sx, n.z - obj.sz) / sdt;
+      obj.sx = n.x; obj.sz = n.z; obj.st = snap.t;
     }
     const wasAlive = obj.alive;
     obj.kind = n.kind;
@@ -412,7 +335,12 @@ export function applyNPCsSnapshot(snap) {
     obj.respawnAt = n.respawnAt || 0;
     // smooth NPC movement a little: lerp toward server position
     const m = obj.mesh;
+    if (!obj.alive && !m.userData.ch.dead) {
+      obj.diedAt = performance.now();
+      chars.die(m.userData.ch);
+    }
     if (!wasAlive && obj.alive) {
+      chars.revive(m.userData.ch);
       m.position.set(n.x, 0, n.z);
     } else {
       m.position.x += (n.x - m.position.x) * 0.5;
@@ -422,7 +350,7 @@ export function applyNPCsSnapshot(snap) {
     while (da > Math.PI) da -= Math.PI * 2;
     while (da < -Math.PI) da += Math.PI * 2;
     m.rotation.y += da * 0.4;
-    m.visible = obj.alive;
+    m.visible = obj.alive || performance.now() - obj.diedAt < DEATH_SHOW_MS;
     if (m.userData.hpSprite) {
       setHpSprite(m.userData.hpSprite, obj.hp, obj.maxHp || 1, 0, n.kind === 'reditel' ? '#ffb347' : '#ff5d7a');
       m.userData.hpSprite.visible = obj.alive;
@@ -435,6 +363,8 @@ export function applyNPCsSnapshot(snap) {
     } else if (obj.say !== obj.lastSay) {
       obj.lastSay = obj.say;
       if (n.kind === 'pes') sfx.dog();
+      if (n.kind === 'namestek') chars.trigger(m.userData.ch, 'shout');
+      if (n.kind === 'pes') chars.trigger(m.userData.ch, 'attack');
     }
     m.userData.stunSprite.visible = obj.alive && now < obj.stunUntil;
   }
@@ -460,9 +390,16 @@ function removeBubble(n) {
   }
 }
 
-export function updateNpcVisuals(nowMs) {
+export function updateNpcVisuals(nowMs, dt) {
   const placed = [];
   for (const n of G.npcs.values()) {
+    chars.drive(n.mesh.userData.ch, {
+      moving: n.speed > 0.25,
+      speed: n.speed,
+      stunned: n.alive && nowMs < n.stunUntil,
+      charging: n.kind === 'namestek' && n.speed > 9,
+    }, dt);
+    if (!n.alive && n.mesh.visible && performance.now() - n.diedAt >= DEATH_SHOW_MS) n.mesh.visible = false;
     if (n.mesh.userData.healRing) {
       n.mesh.userData.healRing.material.opacity = 0.25 + 0.15 * Math.sin(nowMs / 300);
     }

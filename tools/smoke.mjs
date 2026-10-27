@@ -145,15 +145,16 @@ async function main() {
   check('loser got catch-up point', A.me()?.talentPts === 3 && B.me()?.talentPts === 2, `A=${A.me()?.talentPts} B=${B.me()?.talentPts}`);
 
   // talents
-  A.send({ type: 'talent', data: { id: 'u_orbit' } }); // needs Strela: rejected
-  A.send({ type: 'talent', data: { id: 'z_odolnost' } }); // requires Stit: rejected
+  A.send({ type: 'talent', data: { id: 'u_orbit' } }); // deep in the chain: rejected
+  A.send({ type: 'talent', data: { id: 'z_stit' } }); // requires Tlustá kůže: rejected
   A.send({ type: 'talent', data: { id: 'u_lokty' } });
-  A.send({ type: 'talent', data: { id: 'z_stit' } });
-  await sleep(250);
-  check('talent prerequisites enforced', JSON.stringify(A.me()?.talents) === JSON.stringify(['u_lokty', 'z_stit']) && A.me()?.talentPts === 1, `talents=${JSON.stringify(A.me()?.talents)} pts=${A.me()?.talentPts}`);
   A.send({ type: 'talent', data: { id: 'z_kuze' } });
   await sleep(250);
-  check('hp talent raises max hp', A.me()?.maxHp === 120 && A.me()?.talentPts === 0, `maxHp=${A.me()?.maxHp}`);
+  check('talent prerequisites enforced', JSON.stringify(A.me()?.talents) === JSON.stringify(['u_lokty', 'z_kuze']) && A.me()?.talentPts === 1, `talents=${JSON.stringify(A.me()?.talents)} pts=${A.me()?.talentPts}`);
+  check('hp talent raises max hp', A.me()?.maxHp === 120, `maxHp=${A.me()?.maxHp}`);
+  A.send({ type: 'talent', data: { id: 'z_stit' } }); // now unlocked by its parent
+  await sleep(250);
+  check('chain talent unlocks after its parent', JSON.stringify(A.me()?.talents) === JSON.stringify(['u_lokty', 'z_kuze', 'z_stit']) && A.me()?.talentPts === 0, `talents=${JSON.stringify(A.me()?.talents)}`);
 
   // ready both -> next day starts early
   A.send({ type: 'ready', data: { ready: true } });
@@ -161,7 +162,7 @@ async function main() {
   const nextDay = await A.waitMsg('round', d => d.match.phase === 'warmup' && d.match.day === 1, 6000);
   check('all ready skips to next day', !!nextDay, `phase=${A.snap?.match?.phase} day=${A.snap?.match?.day}`);
   await sleep(200);
-  check('talents persist into next day', JSON.stringify(A.me()?.talents) === JSON.stringify(['u_lokty', 'z_stit', 'z_kuze']));
+  check('talents persist into next day', JSON.stringify(A.me()?.talents) === JSON.stringify(['u_lokty', 'z_kuze', 'z_stit']));
   check('scores reset for new day', A.me()?.score === 0 && B.me()?.score === 0);
 
   // reconnect keeps the record
@@ -170,7 +171,7 @@ async function main() {
   const A2 = makeClient('Alice');
   await A2.ready;
   await sleep(400);
-  check('reconnect restores talents by name', JSON.stringify(A2.me()?.talents) === JSON.stringify(['u_lokty', 'z_stit', 'z_kuze']) && A2.me()?.maxHp === 120, JSON.stringify(A2.me()?.talents));
+  check('reconnect restores talents by name', JSON.stringify(A2.me()?.talents) === JSON.stringify(['u_lokty', 'z_kuze', 'z_stit']) && A2.me()?.maxHp === 120, JSON.stringify(A2.me()?.talents));
 
   clearInterval(posLoop);
   A2.ws.close();

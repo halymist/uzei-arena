@@ -1,6 +1,6 @@
 import { G, me, send } from './state.js';
 import { buildMap } from './scene.js';
-import { deriveStats, SPELL_DEFS, DAY_NAMES, SPELL_COLORS } from './config.js';
+import { deriveStats, SPELL_DEFS, DAY_NAMES, SPELL_COLORS, REDITEL_BEAM_WARN_MS } from './config.js';
 import * as ent from './entities.js';
 import * as spells from './spells.js';
 import * as hud from './hud.js';
@@ -109,7 +109,16 @@ function onSnapshot(snap) {
   hud.updateScoreboard();
 }
 
+// which clip a shot or cast plays on its owner
+const FIRE_ANIM = {
+  aa: 'attack', q: 'attack', x: 'attack', g: 'attack', r: 'cast', z: 'cast', pool_cast: 'cast', f_orbit: 'cast',
+  reditel: 'attack', reditel_beam: 'cast', curda_stun: 'cast', curda_salva: 'attack',
+};
+const CAST_ANIM = { w: 'cast', e: 'cast', c: 'dash', v: 'cast', s: 'cast', f: 'cast', q: 'attack' };
+
 function onFire(d) {
+  if (d.kind === 'reditel_beam_warn') ent.animHold(d.owner, 'channel', REDITEL_BEAM_WARN_MS);
+  else if (d.owner !== G.myId && FIRE_ANIM[d.kind]) ent.animEvent(d.owner, FIRE_ANIM[d.kind], { timeScale: d.kind === 'q' || d.kind === 'curda_salva' ? 1.6 : 1 });
   switch (d.kind) {
     case 'pool_cast':
       if (d.owner !== G.myId) spells.spawnPoolEffect(d.owner, d.dx, d.dz * 1000);
@@ -139,6 +148,9 @@ function onHit(d) {
   if (targetPlayer) targetPlayer.hp = d.hp;
   if (targetNpc) targetNpc.hp = d.hp;
   spells.removeProjectileOf(d.shooter, d.pid);
+  if (d.dmg > 0 && !d.killed) ent.animEvent(d.target, 'hit', { priority: 0 });
+  const shooterNpc = G.npcs.get(d.shooter);
+  if (shooterNpc && (shooterNpc.kind === 'pes' || shooterNpc.kind === 'namestek')) ent.animEvent(d.shooter, 'attack');
 
   if (pos && d.dmg > 0) {
     const cls = isMe ? 'dmg-me' : (d.shield ? 'shield' : (byMe ? 'dmg-mine' : 'dmg'));
@@ -226,6 +238,11 @@ function onRound(d) {
 
 function onEffect(d) {
   switch (d.kind) {
+    case 'cast': {
+      // own casts are animated locally the moment the key is pressed
+      if (d.target !== G.myId && CAST_ANIM[d.spell]) ent.animEvent(d.target, CAST_ANIM[d.spell], { timeScale: d.spell === 'w' || d.spell === 'e' ? 2 : 1 });
+      break;
+    }
     case 'lock': {
       const name = SPELL_DEFS[d.spell]?.name || d.spell;
       if (d.target === G.myId) {

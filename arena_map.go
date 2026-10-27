@@ -16,6 +16,8 @@ type mapRect struct {
 	H     float64 `json:"h"`
 	Kind  string  `json:"kind"` // wall | glass | desk | rack | pillar | printer
 	Color string  `json:"color,omitempty"`
+	// Variant is a rendering hint for desks: pair (default), exec, meeting, counter.
+	Variant string `json:"variant,omitempty"`
 }
 
 type mapZone struct {
@@ -28,9 +30,10 @@ type mapZone struct {
 }
 
 type mapProp struct {
-	Kind string  `json:"kind"` // plant | watercooler | whiteboard
+	Kind string  `json:"kind"` // plant | watercooler | whiteboard | coffee | microwave
 	X    float64 `json:"x"`
 	Z    float64 `json:"z"`
+	Y    float64 `json:"y,omitempty"` // height off the floor (items standing on a counter)
 	Rot  float64 `json:"rot,omitempty"`
 }
 
@@ -110,7 +113,7 @@ func buildArena() mapDef {
 		seg("wall", -15, -10.5, -15, -8, wt, wh),
 		seg("wall", -28, -8, -23, -8, wt, wh),
 		seg("wall", -20.5, -8, -15, -8, wt, wh),
-		mapRect{X: -22.5, Z: -14.5, W: 4.2, D: 1.6, H: 1.0, Kind: "desk", Color: "#5a3f2e"},
+		mapRect{X: -22.5, Z: -14.5, W: 4.2, D: 1.6, H: 1.0, Kind: "desk", Color: "#5a3f2e", Variant: "exec"},
 	)
 
 	// Kuchynka (NE): walls with doors, a long counter.
@@ -119,7 +122,7 @@ func buildArena() mapDef {
 		seg("wall", 15, -11, 15, -9, wt, wh),
 		seg("wall", 15, -9, 19.5, -9, wt, wh),
 		seg("wall", 22.5, -9, 28, -9, wt, wh),
-		mapRect{X: 22.5, Z: -16.8, W: 9, D: 1.2, H: 1.0, Kind: "desk", Color: "#6b7f8a"},
+		mapRect{X: 22.5, Z: -16.8, W: 9, D: 1.2, H: 1.0, Kind: "desk", Color: "#6b7f8a", Variant: "counter"},
 	)
 
 	// Serverovna (SW): walls with doors, two server racks.
@@ -138,7 +141,7 @@ func buildArena() mapDef {
 		seg("glass", 15, 14, 15, 18, wt, wh),
 		seg("glass", 15, 8, 20, 8, wt, wh),
 		seg("glass", 23, 8, 28, 8, wt, wh),
-		mapRect{X: 21.5, Z: 13, W: 6, D: 2.4, H: 1.0, Kind: "desk", Color: "#4a3a2c"},
+		mapRect{X: 21.5, Z: 13, W: 6, D: 2.4, H: 1.0, Kind: "desk", Color: "#4a3a2c", Variant: "meeting"},
 	)
 
 	// Open space: desk pairs as low cover, pillars and printers.
@@ -167,8 +170,10 @@ func buildArena() mapDef {
 		{Kind: "plant", X: 13.5, Z: 16.5},
 		{Kind: "plant", X: -26.5, Z: -9.5},
 		{Kind: "watercooler", X: 26.8, Z: -10.2},
-		{Kind: "whiteboard", X: 27.4, Z: 13, Rot: math.Pi / 2},
-		{Kind: "whiteboard", X: -27.4, Z: -12, Rot: -math.Pi / 2},
+		{Kind: "coffee", X: 19.5, Z: -16.9, Y: 1.0},
+		{Kind: "microwave", X: 25.5, Z: -16.9, Y: 1.0},
+		{Kind: "whiteboard", X: 27.4, Z: 13, Rot: -math.Pi / 2},
+		{Kind: "whiteboard", X: -27.4, Z: -12, Rot: math.Pi / 2},
 	}
 
 	spawns := []mapPoint{

@@ -370,11 +370,12 @@ function renderStandings(st, dayResult) {
 
 // ------------------------------------------------------------ talent tree
 
-const TREE_COLS = 7;
+const TREE_COLS = 3;
 
 function talentState(t, owned) {
   if (owned.has(t.id)) return 'owned';
-  if (!t.requires || owned.has(t.requires)) return G.myTalentPts > 0 ? 'avail' : 'open';
+  const req = t.requires || [];
+  if (!req.length || req.some(r => owned.has(r))) return G.myTalentPts > 0 ? 'avail' : 'open';
   return 'locked';
 }
 
@@ -407,18 +408,25 @@ function drawTalentArrows() {
   svg.setAttribute('width', w);
   svg.setAttribute('height', h);
   let paths = '';
+  const owned = new Set(G.myTalents);
   for (const node of grid.querySelectorAll('.t-node')) {
     const t = G.talentById.get(node.dataset.talent);
     if (!t || !t.requires) continue;
-    const parent = grid.querySelector(`.t-node[data-talent="${t.requires}"]`);
-    if (!parent) continue;
-    const x1 = parent.offsetLeft + parent.offsetWidth / 2;
-    const y1 = parent.offsetTop + parent.offsetHeight;
     const x2 = node.offsetLeft + node.offsetWidth / 2;
     const y2 = node.offsetTop;
-    const midY = y1 + (y2 - y1) * 0.5;
-    const lit = node.classList.contains('owned') || node.classList.contains('avail') || node.classList.contains('open');
-    paths += `<path class="${lit ? 'lit' : ''}" d="M${x1} ${y1} L${x1} ${midY} L${x2} ${midY} L${x2} ${y2 - 2}"/><path class="head ${lit ? 'lit' : ''}" d="M${x2 - 5} ${y2 - 7} L${x2} ${y2 - 1} L${x2 + 5} ${y2 - 7}"/>`;
+    for (const r of t.requires) {
+      const parent = grid.querySelector(`.t-node[data-talent="${r}"]`);
+      if (!parent) continue;
+      // side links leave from a third of the way in so they do not pile up
+      const x1 = parent.offsetLeft + parent.offsetWidth / 2;
+      const y1 = parent.offsetTop + parent.offsetHeight;
+      const diag = Math.abs(x1 - x2) > 4;
+      const ex = diag ? x2 + Math.sign(x1 - x2) * node.offsetWidth * 0.28 : x2;
+      const midY = y1 + (y2 - y1) * 0.5;
+      // an arrow lights up when it is an open way in: its parent is owned
+      const lit = owned.has(r) || (!diag && !node.classList.contains('locked'));
+      paths += `<path class="${lit ? 'lit' : ''}" d="M${x1} ${y1} L${x1} ${midY} L${ex} ${midY} L${ex} ${y2 - 2}"/><path class="head ${lit ? 'lit' : ''}" d="M${ex - 5} ${y2 - 7} L${ex} ${y2 - 1} L${ex + 5} ${y2 - 7}"/>`;
+    }
   }
   svg.innerHTML = paths;
 }
@@ -428,7 +436,8 @@ function showTalentTip(node) {
   const t = node && G.talentById.get(node.dataset.talent);
   if (!t) { el.talentTip.hidden = true; return; }
   const owned = new Set(G.myTalents);
-  const req = t.requires && !owned.has(t.requires) ? `vyžaduje ${G.talentById.get(t.requires)?.name || t.requires}` : '';
+  const missing = (t.requires || []).length && !t.requires.some(r => owned.has(r));
+  const req = missing ? `vyžaduje ${t.requires.map(r => G.talentById.get(r)?.name || r).join(' nebo ')}` : '';
   el.talentTip.innerHTML = `<b>${escapeHtml(t.name)}</b>${escapeHtml(t.desc)}${req ? `<div class="t-req">${escapeHtml(req)}</div>` : ''}`;
   el.talentTip.hidden = false;
   const r = node.getBoundingClientRect();

@@ -206,12 +206,14 @@ svg { display: block; }
 .talent-pts { font-weight: 700; font-size: 12px; color: var(--muted); text-transform: none; letter-spacing: 0; }
 .talent-pts.has { color: var(--gold); }
 .talent-panel { padding: 12px; border-radius: var(--radius); border: 1px solid var(--line); background: rgba(255,255,255,0.025); }
-.t-grid { position: relative; display: grid; grid-template-columns: repeat(7, 1fr); grid-auto-rows: 64px; gap: 16px 8px; }
+.t-grid { position: relative; display: grid; grid-template-columns: repeat(3, 150px); grid-auto-rows: 40px; gap: 12px 22px; justify-content: center; }
 .t-node {
-  position: relative; z-index: 1; width: 100%; height: 100%; padding: 4px 4px; border-radius: 12px; border: 1px solid var(--line-strong);
-  background: rgba(14, 19, 36, 0.95); color: var(--fg); cursor: default; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; text-align: center;
+  position: relative; z-index: 1; width: 100%; height: 100%; padding: 2px 8px; border-radius: 10px; border: 1px solid var(--line-strong);
+  background: rgba(14, 19, 36, 0.95); color: var(--fg); cursor: default; display: grid; grid-template-columns: 20px 1fr; column-gap: 8px; align-items: center; text-align: left;
   --bc: #9fb8e0; --bcs: rgba(159,184,224,0.14); transition: border-color 120ms, background 120ms;
 }
+.t-node .t-icon { grid-row: 1 / span 2; }
+.t-node .t-name, .t-node .t-spell { grid-column: 2; }
 .t-node.b-utok { --bc: #ff7a7a; --bcs: rgba(255,122,122,0.16); }
 .t-node.b-pohyb { --bc: #5ee1ff; --bcs: rgba(94,225,255,0.16); }
 .t-node.b-preziti { --bc: #4ade80; --bcs: rgba(74,222,128,0.16); }

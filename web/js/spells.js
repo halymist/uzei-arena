@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { G, me, send, canAct } from './state.js';
 import { scene, pointInObstacle, pointInProjectileBlocker, segmentEndpoint, clampToMap, halfX, halfZ, updateMouseWorld } from './scene.js';
 import * as C from './config.js';
-import { collision, playerPos } from './entities.js';
+import { collision, playerPos, animEvent } from './entities.js';
 import * as fx from './fx.js';
 import { sfx } from './audio.js';
 
@@ -61,7 +61,15 @@ export function cooldownInfo(kind, now = performance.now()) {
 
 // ------------------------------------------------------------ casting
 
+const LOCAL_CAST_ANIM = { w: ['cast', 2], e: ['cast', 2], c: ['dash', 1], v: ['cast', 1], s: ['cast', 1], f: ['cast', 1], z: ['cast', 1] };
+
 export function cast(kind) {
+  const ok = castInner(kind);
+  if (ok && LOCAL_CAST_ANIM[kind]) animEvent(G.myId, LOCAL_CAST_ANIM[kind][0], { timeScale: LOCAL_CAST_ANIM[kind][1] });
+  return ok;
+}
+
+function castInner(kind) {
   if (!canCast(kind)) return false;
   const now = performance.now();
   updateMouseWorld();
@@ -285,6 +293,7 @@ export function fireProjectile(kind) {
   G.aimUntil = performance.now() + 320;
   spawnProjectile({ owner: G.myId, pid, ox, oz, dx, dz, kind });
   send({ type: 'fire', data: { pid, ox, oz, dx, dz, kind } });
+  animEvent(G.myId, kind === 'r' ? 'cast' : 'attack', { timeScale: kind === 'q' ? 1.6 : 1.2 });
   sfx.shoot(kind);
   fx.muzzleFlash(ox, oz, C.SPELL_COLORS[kind] || 0xffe48a);
 }
